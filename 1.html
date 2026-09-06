@@ -13,13 +13,14 @@
     --border:#e5e7eb; --surface:#ffffff; --bg:#f3f4f6;
     --font-body: 'Segoe UI', Tahoma, 'Noto Sans Arabic', Arial, sans-serif;
     --font-mono: 'Consolas', 'Courier New', monospace;
+    --font-label: Georgia, 'Times New Roman', 'Noto Serif', serif; /* خط عنوان الليبل — مطابق لـ Retail Force */
   }
   *{box-sizing:border-box;}
   body{
     margin:0; font-family:var(--font-body); background:var(--bg);
     color:var(--text-primary); direction:rtl;
   }
-  .container{max-width:900px; margin:0 auto; padding:20px;}
+  .container{max-width:960px; margin:0 auto; padding:20px;}
   header{
     display:flex; align-items:center; justify-content:space-between;
     background:var(--surface); border:1px solid var(--border); border-radius:12px;
@@ -80,25 +81,50 @@
   th, td{padding:10px 8px; text-align:right; border-bottom:1px solid var(--border);}
   th{color:var(--text-secondary); font-weight:600; font-size:12.5px;}
   td.sku{font-family:var(--font-mono); direction:ltr; text-align:left; font-weight:600;}
-  td.no-sku{color:var(--red); font-size:12px;}
+  td.barcode-val{font-family:var(--font-mono); direction:ltr; text-align:left;}
+  td.barcode-val.missing{color:var(--red); font-size:12px; font-family:var(--font-body);}
   .qty-input{width:60px; padding:6px 8px; border:1.5px solid var(--border); border-radius:6px; font-family:var(--font-mono); text-align:center;}
   .thumb{width:38px; height:38px; border-radius:6px; object-fit:cover; border:1px solid var(--border); background:#f9fafb;}
 
-  #printArea{display:none;}
-  .barcode-label{
-    display:inline-block; border:1px dashed #cbd5e1; border-radius:8px; padding:10px 14px;
-    margin:6px; text-align:center; background:#fff;
-  }
-  .barcode-label .lbl-title{font-size:11px; font-weight:600; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-bottom:2px;}
-  .barcode-label .lbl-sku{font-size:10px; color:var(--text-secondary); font-family:var(--font-mono);}
-
   .empty-hint{text-align:center; color:var(--text-secondary); padding:30px 10px; font-size:14px;}
-  .footer-actions{display:flex; justify-content:flex-end; gap:10px; margin-top:16px;}
+  .footer-actions{display:flex; justify-content:space-between; align-items:center; gap:10px; margin-top:16px;}
+  .footer-actions .note{font-size:12px; color:var(--text-secondary);}
+
+  /* ══════════════════════════════════════════════════════
+     منطقة الطباعة — الليبل الفعلي (2in × 1in، مطابق لتطبيق Retail Force
+     Barcode المستخدم حاليًا: SKU نص فوق (خط سيريف بولد) + باركود تحته
+     بيشفّر رقم الـ Barcode الفعلي — بدون أي نص تحت الباركود).
+     ══════════════════════════════════════════════════════ */
+  #printArea{display:none;}
+  .print-label{
+    width:2in; height:1in; box-sizing:border-box; padding:0.1in;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    gap:0.06in; overflow:hidden; background:#fff;
+  }
+  .print-label .lbl-sku-text{
+    font-family:var(--font-label); font-weight:700; color:#000;
+    white-space:nowrap; line-height:1; text-align:center;
+    font-size:22px; /* بيتظبط ديناميكيًا بالجافاسكريبت عشان يتظبط في سطر واحد */
+  }
+  .print-label svg{ display:block; max-width:100%; }
+
+  @media screen{
+    /* معاينة على الشاشة بس — مش جزء من الطباعة نفسها */
+    #printPreviewWrap{margin-top:14px; padding-top:14px; border-top:1px dashed var(--border);}
+    #printPreviewWrap .preview-title{font-size:12px; color:var(--text-secondary); margin-bottom:8px; font-weight:600;}
+    #printPreviewWrap .preview-grid{display:flex; flex-wrap:wrap; gap:10px;}
+    #printPreviewWrap .print-label{border:1px dashed #cbd5e1; border-radius:4px;}
+  }
 
   @media print{
     body *{visibility:hidden;}
     #printArea, #printArea *{visibility:visible;}
-    #printArea{display:block !important; position:absolute; top:0; right:0; left:0;}
+    #printArea{
+      display:block !important; position:absolute; top:0; right:0; left:0;
+    }
+    @page{ size:2in 1in; margin:0; }
+    .print-label{ page-break-after:always; }
+    .print-label:last-child{ page-break-after:auto; }
   }
 </style>
 </head>
@@ -109,7 +135,7 @@
   <header>
     <div class="title">
       🏷️ طباعة باركود SKU للأوردر
-      <span class="sub">نسخة تجريبية سريعة — v0.1</span>
+      <span class="sub">نسخة تجريبية سريعة — v0.2 (مطابقة لتيمبلت Retail Force)</span>
     </div>
     <button class="icon-btn" onclick="toggleSettings()">⚙️ الإعدادات</button>
   </header>
@@ -142,12 +168,18 @@
     </div>
     <table>
       <thead>
-        <tr><th></th><th>المنتج</th><th>SKU</th><th>الكمية</th><th>عدد الطباعة</th></tr>
+        <tr><th></th><th>المنتج</th><th>SKU</th><th>Barcode</th><th>الكمية</th><th>عدد الطباعة</th></tr>
       </thead>
       <tbody id="itemsBody"></tbody>
     </table>
     <div class="footer-actions">
+      <span class="note" id="printNote"></span>
       <button class="btn btn-green" onclick="printBarcodes()">🖨️ طباعة الباركود</button>
+    </div>
+
+    <div id="printPreviewWrap" style="display:none;">
+      <div class="preview-title">معاينة الليبل قبل الطباعة (مقاس 2×1 إنش):</div>
+      <div class="preview-grid" id="previewGrid"></div>
     </div>
   </div>
 
@@ -157,7 +189,7 @@
 
 </div>
 
-<!-- منطقة الطباعة — مخفية على الشاشة، بتظهر بس وقت الطباعة -->
+<!-- منطقة الطباعة الفعلية — مخفية على الشاشة، بتظهر بس وقت الطباعة -->
 <div id="printArea"></div>
 
 <script>
@@ -271,19 +303,28 @@ function renderOrder(data) {
   document.getElementById('orderBadges').innerHTML = badges.join('');
 
   const tbody = document.getElementById('itemsBody');
+  const missingCount = currentItems.filter(it => !it.barcode).length;
+
   if (!currentItems.length) {
-    tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-secondary);padding:20px;">مفيش منتجات فعّالة في الأوردر ده</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--text-secondary);padding:20px;">مفيش منتجات فعّالة في الأوردر ده</td></tr>`;
   } else {
     tbody.innerHTML = currentItems.map((it, i) => `
       <tr>
         <td>${it.image ? `<img class="thumb" src="${it.image}">` : ''}</td>
         <td>${escapeHtml(it.title)}${it.variantTitle ? `<div style="font-size:11px;color:var(--text-secondary);">${escapeHtml(it.variantTitle)}</div>` : ''}</td>
-        <td class="${it.sku ? 'sku' : 'no-sku'}">${it.sku ? escapeHtml(it.sku) : 'لا يوجد SKU'}</td>
+        <td class="sku">${it.sku ? escapeHtml(it.sku) : '—'}</td>
+        <td class="barcode-val ${it.barcode ? '' : 'missing'}">${it.barcode ? escapeHtml(it.barcode) : '⚠️ لا يوجد Barcode'}</td>
         <td>${it.quantity}</td>
-        <td><input type="number" class="qty-input" min="0" value="${it.sku ? it.quantity : 0}" id="printQty${i}" ${it.sku ? '' : 'disabled'}></td>
+        <td><input type="number" class="qty-input" min="0" value="${it.barcode ? it.quantity : 0}" id="printQty${i}" ${it.barcode ? '' : 'disabled'}></td>
       </tr>
     `).join('');
   }
+
+  document.getElementById('printNote').textContent = missingCount
+    ? `⚠️ ${missingCount} صنف من غير رقم Barcode مسجّل — مش هيتطبع لحد ما يتسجّل على شوبيفاي`
+    : '';
+  document.getElementById('previewGrid').innerHTML = '';
+  document.getElementById('printPreviewWrap').style.display = 'none';
 
   document.getElementById('resultCard').style.display = 'block';
 }
@@ -293,43 +334,126 @@ function escapeHtml(s) {
 }
 
 // ══════════════════════════════════════════════════════
+// §LABEL-JS — بناء الليبل: SKU نص فوق + باركود (رقم الـ Barcode) تحته
+// مطابق تمامًا لتيمبلت "Retail Force Barcode" الحالي (2in × 1in، بدون نص
+// تحت الباركود، خط سيريف بولد للنص).
+// ══════════════════════════════════════════════════════
+
+// بيقلل حجم الخط تدريجيًا لحد ما نص الـ SKU يتظبط في سطر واحد داخل الليبل —
+// نفس فكرة "auto-fit" اللي التطبيق الحالي بيعملها لأطوال SKU المختلفة.
+//
+// ⚠️ ليه Canvas measureText مش el.scrollWidth: #printArea فيه display:none
+// طول الوقت لحد ما الطباعة الفعلية تبدأ (@media print بس) — يعني أي قياس
+// بيعتمد على layout (scrollWidth/offsetWidth) بيرجّع صفر دايمًا هنا، والحلقة
+// كانت بتوهم إنها "شغالة" لكن فعليًا بتوقف فورًا من غير أي تصغير حقيقي.
+// Canvas measureText بيحسب عرض النص من الخط نفسه من غير ما يحتاج العنصر
+// يبقى مرسوم على الشاشة أصلاً — تم التأكد بالاختبار (Playwright).
+const _measureCanvas = document.createElement('canvas');
+const _measureCtx = _measureCanvas.getContext('2d');
+function textWidthAtSize(text, sizePx, fontFamily) {
+  _measureCtx.font = `700 ${sizePx}px ${fontFamily}`;
+  return _measureCtx.measureText(text).width;
+}
+function fitLabelText(el, text, maxWidthPx) {
+  const fontFamily = getComputedStyle(document.documentElement).getPropertyValue('--font-label').trim() || 'Georgia, serif';
+  let size = 22;
+  while (size > 8 && textWidthAtSize(text, size, fontFamily) > maxWidthPx) size -= 1;
+  el.style.fontSize = size + 'px';
+}
+
+// بيبني عنصر ليبل واحد (SKU + باركود) ويرجّعه — نفس المنطق بيُستخدم في
+// الطباعة الفعلية وفي المعاينة على الشاشة، عشان الاتنين يفضلوا متطابقين.
+function buildLabelEl(item) {
+  const wrap = document.createElement('div');
+  wrap.className = 'print-label';
+
+  const textEl = document.createElement('div');
+  textEl.className = 'lbl-sku-text';
+  textEl.textContent = item.sku || item.barcode;
+  wrap.appendChild(textEl);
+
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(svgNS, 'svg');
+  wrap.appendChild(svg);
+
+  // بارکود CODE128 — بيشفّر رقم الـ Barcode الفعلي، مش الـ SKU.
+  // JsBarcode مكتبة متزامنة (sync) — بتترسم فورًا من غير أي setTimeout.
+  try {
+    JsBarcode(svg, item.barcode, {
+      format: 'CODE128',
+      width: 1.7,
+      height: 34,
+      margin: 0,
+      displayValue: false, // زي الإعداد الحالي: "Content below barcode: None"
+    });
+  } catch (e) {
+    // SKU/Barcode فيه حروف مش مدعومة — نادر جدًا مع أرقام، بس بنمسك الاستثناء
+    // عشان لبيل واحد ما يوقفش باقي الطباعة.
+    svg.outerHTML = `<div style="color:red;font-size:10px;">تعذّر رسم الباركود</div>`;
+  }
+
+  return wrap;
+}
+
+function labelsToPrint() {
+  const labels = [];
+  currentItems.forEach((it, i) => {
+    if (!it.barcode) return;
+    const qtyEl = document.getElementById(`printQty${i}`);
+    const copies = Math.max(0, parseInt(qtyEl.value, 10) || 0);
+    for (let c = 0; c < copies; c++) labels.push(it);
+  });
+  return labels;
+}
+
+// ══════════════════════════════════════════════════════
 // §PRINT-JS
 // ══════════════════════════════════════════════════════
 function printBarcodes() {
-  const printArea = document.getElementById('printArea');
-  printArea.innerHTML = '';
-
-  let labelCount = 0;
-  currentItems.forEach((it, i) => {
-    if (!it.sku) return;
-    const qtyEl = document.getElementById(`printQty${i}`);
-    const copies = Math.max(0, parseInt(qtyEl.value, 10) || 0);
-    for (let c = 0; c < copies; c++) {
-      const wrap = document.createElement('div');
-      wrap.className = 'barcode-label';
-      const svgId = `bc-${i}-${c}`;
-      wrap.innerHTML = `
-        <div class="lbl-title">${escapeHtml(it.title)}</div>
-        <svg id="${svgId}"></svg>
-        <div class="lbl-sku">${escapeHtml(it.sku)}</div>
-      `;
-      printArea.appendChild(wrap);
-      labelCount++;
-      // بيتنفذ بعد ما الـ SVG يبقى موجود في الـ DOM
-      setTimeout(() => {
-        try {
-          JsBarcode(`#${svgId}`, it.sku, { format: 'CODE128', width: 1.6, height: 40, fontSize: 11, margin: 4 });
-        } catch (e) { /* SKU فيه حروف مش مدعومة في CODE128 — نادر */ }
-      }, 0);
-    }
-  });
-
-  if (labelCount === 0) {
-    showStatus('مفيش أي منتج بـ SKU وعدد طباعة أكبر من صفر', 'warn');
+  if (typeof JsBarcode === 'undefined') {
+    showStatus('مكتبة الباركود (JsBarcode) ما اتحمّلتش — تأكد من اتصال الإنترنت وأعد تحميل الصفحة.', 'error');
     return;
   }
 
-  setTimeout(() => window.print(), 150);
+  const labels = labelsToPrint();
+  if (!labels.length) {
+    showStatus('مفيش أي منتج بـ Barcode وعدد طباعة أكبر من صفر', 'warn');
+    return;
+  }
+
+  const printArea = document.getElementById('printArea');
+  printArea.innerHTML = '';
+  const els = [];
+  labels.forEach(item => {
+    const el = buildLabelEl(item);
+    printArea.appendChild(el);
+    els.push(el);
+  });
+
+  // معاينة على الشاشة (نفس عناصر الطباعة بالظبط — مش نسخة منفصلة)
+  const previewGrid = document.getElementById('previewGrid');
+  previewGrid.innerHTML = '';
+  document.getElementById('printPreviewWrap').style.display = 'block';
+
+  // ضبط حجم خط الـ SKU لكل ليبل عشان يتظبط في سطر واحد (1.8in = عرض المحتوى)
+  const maxWidthPx = 1.8 * 96; // 96 CSS px تساوي 1 إنش تقريبًا
+  els.forEach(el => {
+    const textEl = el.querySelector('.lbl-sku-text');
+    fitLabelText(textEl, textEl.textContent, maxWidthPx);
+    previewGrid.appendChild(el.cloneNode(true));
+  });
+
+  clearStatus();
+
+  // مهم: مستنيين رسم فعلي (paint) قبل ما نفتح نافذة الطباعة، عشان الباركود
+  // (SVG اتضاف ديناميكيًا) يبان فعلاً في الطباعة — استخدمنا double
+  // requestAnimationFrame بدل setTimeout الثابت، وده بيضمن إن المتصفح خلص
+  // layout + paint فعلاً قبل window.print().
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      window.print();
+    });
+  });
 }
 
 // ══════════════════════════════════════════════════════
@@ -343,6 +467,9 @@ loadSettingsIntoInputs();
 if (!isConfigured()) {
   toggleSettings(true);
   showStatus('حط رابط الـ Worker والسر في الإعدادات الأول ⚙️', 'warn');
+}
+if (typeof JsBarcode === 'undefined') {
+  showStatus('تنبيه: مكتبة الباركود ما اتحمّلتش لسه (JsBarcode) — لو المشكلة استمرت حاول تعيد تحميل الصفحة.', 'warn');
 }
 </script>
 
