@@ -1,11 +1,12 @@
 // ══════════════════════════════════════════════════════════════
-// EcomModa — Order SKU Barcode Printer Worker (v1.0.0)
+// EcomModa — Order SKU Barcode Printer Worker (v1.1.0)
 // skills: worker-builder v2.1.0 · constants v1.10.0 ·
 //         shopify-graphql-helper v1.1.0 — 06-09-2026
 // ══════════════════════════════════════════════════════════════
 //
 // بيرجّع بيانات الباركود عشان الواجهة تطبع ليبل 2×1 إنش:
 //   ① `get_order`  — أوردر كامل → بنوده الفعّالة (SKU · barcode · كمية)
+//                    بـ `order=` (الاسم) أو `id=` (الـ ID الرقمي — v1.1.0)
 //   ② `search_sku` — بحث مباشر بـ SKU أو رقم باركود، **من غير أوردر**
 //
 // 🔴 **قراءة بحتة.** صفر كتابة على شوبيفاي · صفر كتابة في D1 · صفر
@@ -32,7 +33,7 @@
 // §CONSTANTS
 // ══════════════════════════════════════════════════════
 const TOOL_NAME      = 'order_sku_barcode_printer';
-const WORKER_VERSION = '1.0.0';
+const WORKER_VERSION = '1.1.0';
 const SECRET_GROUP   = 'warehouse_ops';
 const API_VERSION    = '2026-01';   // صريحة دايمًا — ممنوع "latest"
 
@@ -175,10 +176,12 @@ async function shopifyGQL(env, token, query, variables = {}, opName = 'shopify')
 // ══════════════════════════════════════════════════════
 
 // ─── §BARCODE::fetchOrderItems ───
-const Q_ORDER = `
-  query OrderItems($q: String!) {
-    orders(first: 1, query: $q) {
-      nodes {
+//
+// 🔴 **الحقول معرّفة مرة واحدة** (`ORDER_FIELDS`) والاستعلامان بينادوها.
+//    البحث بالاسم والبحث بالـ ID لازم يرجّعوا **نفس الشكل بالحرف** —
+//    نسختين من قايمة الحقول كانتا هيفترقا مع أول حقل جديد، والفرق
+//    بيظهر كعمود فاضي في مسار واحد بس (درس R1).
+const ORDER_FIELDS = `
         id
         legacyResourceId
         name
@@ -200,20 +203,33 @@ const Q_ORDER = `
             }
           }
         }
+`;
+
+const Q_ORDER = `
+  query OrderItems($q: String!) {
+    orders(first: 1, query: $q) {
+      nodes {
+${ORDER_FIELDS}
       }
     }
   }
 `;
 
-async function fetchOrderItems(env, token, rawOrder) {
-  // تطبيع اسم الأوردر — فلتر `name:` بيطلب الـ `#`
-  // (`shopify-graphql-helper` Step 3).
-  const orderName = rawOrder.startsWith('#') ? rawOrder : '#' + rawOrder;
+// ⚠️ البحث بالـ ID بيستخدم الجذر `order(id:)` مش فلتر `id:` جوّه
+//    `orders(query:)` — الفلتر النصي بيرجّع **صفر نتايج بلا أي خطأ** لو
+//    الشكل مش مظبوط، والجذر بيرجّع `null` صريحة (نفس عيلة الفخ في
+//    `shopify-graphql-helper` Step 3).
+const Q_ORDER_BY_ID = `
+  query OrderById($id: ID!) {
+    order(id: $id) {
+${ORDER_FIELDS}
+    }
+  }
+`;
 
-  const data = await shopifyGQL(env, token, Q_ORDER, { q: `name:${orderName}` }, 'get_order');
-  const order = data?.data?.orders?.nodes?.[0];
-  if (!order) return null;
-
+// بيحوّل رد شوبيفاي للشكل اللي الواجهة بتقراه. **المسارين بيعدّوا من
+// هنا** — مفيش تشكيل تاني في أي مكان.
+function shapeOrder(order) {
   const li = order.lineItems || {};
   const items = (li.nodes || [])
     // ⚠️ `currentQuantity` مش `quantity` — التانية بتشمل البنود الملغية،
@@ -245,6 +261,35 @@ async function fetchOrderItems(env, token, rawOrder) {
     itemsTruncated: !!li.pageInfo?.hasNextPage,
     itemsCap:       ORDER_LINE_ITEMS_MAX,
   };
+}
+
+async function fetchOrderItems(env, token, rawOrder) {
+  // تطبيع اسم الأوردر — فلتر `name:` بيطلب الـ `#`
+  // (`shopify-graphql-helper` Step 3).
+  const orderName = rawOrder.startsWith('#') ? rawOrder : '#' + rawOrder;
+
+  const data = await shopifyGQL(env, token, Q_ORDER, { q: `name:${orderName}` }, 'get_order');
+  const order = data?.data?.orders?.nodes?.[0];
+  if (!order) return null;
+  return shapeOrder(order);
+}
+
+// ─── §BARCODE::fetchOrderById (v1.1.0) ───
+//
+// 🔴 **ده اللي بيخلّي ماسح باركود شوبيفاي يشتغل.** باركود الأوردر
+//    المطبوع بيشفّر الـ **ID الرقمي** (١٠ أرقام فأكتر) مش اسم الأوردر
+//    (٥ أرقام)، فبحث `name:` عليه بيرجّع 404 على أوردر موجود فعلاً.
+//    نفس التفرقة الموجودة في `orders-packing-checker-worker`.
+//
+// ⚠️ الرقم بيتفحص إنه **أرقام بس** قبل ما يتركّب في الـ GID — من غير
+//    الفحص ده أي نص بيتحقن في معرّف شوبيفاي.
+async function fetchOrderById(env, token, rawId) {
+  if (!/^\d+$/.test(rawId)) return null;
+  const data = await shopifyGQL(
+    env, token, Q_ORDER_BY_ID, { id: `gid://shopify/Order/${rawId}` }, 'get_order_by_id');
+  const order = data?.data?.order;
+  if (!order) return null;
+  return shapeOrder(order);
 }
 
 // ─── §BARCODE::searchVariants ───
@@ -392,13 +437,17 @@ export default {
       // ─── §BARCODE ─────────────────────────────────────────
       if (action === 'get_order') {
         assertEnv(env, ['SHOP_DOMAIN', 'CLIENT_ID', 'CLIENT_SECRET']);
-        const raw = (url.searchParams.get('order') || '').trim();
-        if (!raw) return json({ error: 'رقم الأوردر مطلوب' }, 400, request);
+        // `id=` = الـ ID الرقمي (باركود الأوردر المطبوع) · `order=` = الاسم.
+        // الاتنين بيرجّعوا **نفس الشكل** من `shapeOrder`.
+        const rawId = (url.searchParams.get('id')    || '').trim();
+        const raw   = (url.searchParams.get('order') || '').trim();
+        if (!rawId && !raw) return json({ error: 'رقم الأوردر مطلوب' }, 400, request);
 
-        const token = await getAccessToken(env);
-        const result = await fetchOrderItems(env, token, raw);
+        const token  = await getAccessToken(env);
+        const result = rawId ? await fetchOrderById(env, token, rawId)
+                             : await fetchOrderItems(env, token, raw);
         if (!result) {
-          const shown = raw.startsWith('#') ? raw : '#' + raw;
+          const shown = rawId ? `ID ${rawId}` : (raw.startsWith('#') ? raw : '#' + raw);
           return json({ error: `الأوردر ${shown} مش موجود` }, 404, request);
         }
         return json({ ok: true, ...result }, 200, request);
