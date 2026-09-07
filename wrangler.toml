@@ -1,0 +1,38 @@
+# ══════════════════════════════════════════════════════════════
+# order-sku-barcode-printer-worker
+# ══════════════════════════════════════════════════════════════
+# ⚠️ `name` لازم يطابق اسم الـ Worker في الداشبورد **بالحرف** — أي اختلاف
+#    بيعمل Worker شبح تاني والأداة تفضل على النسخة القديمة من غير أي خطأ.
+name               = "order-sku-barcode-printer-worker"
+main               = "index.js"
+compatibility_date = "2026-01-01"
+workers_dev        = true
+
+[observability]
+enabled = true
+
+# 🔴 **مفيش `[[d1_databases]]` هنا — وده مقصود.**
+#    الأداة قراءة بحتة: صفر كتابة على شوبيفاي وصفر صف في D1، فمفيش
+#    `writeLog` ومفيش binding. الانحراف الموثّق عن `ecommoda-worker-builder`
+#    Rule 2 مكتوب في `index.js` §HEADER وفي `CLAUDE.md`.
+#    لو اتقرر تسجيل الطباعة بعدين: يتضاف الـ binding **و** يتسجّل صف
+#    `order_sku_barcode_printer` في `ecommoda-constants` §7 قبل أول كتابة.
+
+[vars]
+SHOP_DOMAIN = "6c7e1a-53.myshopify.com"
+# مفيش `LOCATION_ID` — الأداة مابتلمسش المخزون.
+
+# ══════════════════════════════════════════════════════════════
+# الأسرار — من الداشبورد بس، وبعدها **Promote** (مش في الريبو أبدًا)
+# ══════════════════════════════════════════════════════════════
+#   WORKER_SECRET  ← 🔴 قيمة **مجموعة `warehouse_ops`** نفسها، مش قيمة
+#                     فريدة (`ecommoda-constants` §6). لازم تطابق الطباعة
+#                     والتغليف وحذف المنتج بالحرف، وإلا الهب بيرجّع 401
+#                     من الصفحة دي لوحدها. اتأكد بـ `?action=diag` إن
+#                     **بصمة السر** واحدة في الأربعة.
+#   CLIENT_ID      ← Shopify Custom App
+#   CLIENT_SECRET  ← Shopify Custom App
+#
+# صلاحيات الـ Custom App المطلوبة: `read_orders` **و`read_products`**.
+# التانية مش اختيارية — رقم الـ Barcode جاي من المتغيّر، و`search_sku`
+# بيستعلم `productVariants` مباشرة.
