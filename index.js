@@ -1,5 +1,5 @@
 // ══════════════════════════════════════════════════════════════
-// EcomModa — Order SKU Barcode Printer Worker (v1.2.0)
+// EcomModa — Order SKU Barcode Printer Worker (v1.3.0)
 // skills: worker-builder v2.1.0 · constants v1.10.0 ·
 //         shopify-graphql-helper v1.1.0 — 08-09-2026
 // ══════════════════════════════════════════════════════════════
@@ -49,7 +49,7 @@
 // §CONSTANTS
 // ══════════════════════════════════════════════════════
 const TOOL_NAME      = 'order_sku_barcode_printer';
-const WORKER_VERSION = '1.2.1';
+const WORKER_VERSION = '1.3.0';
 const SECRET_GROUP   = 'warehouse_ops';
 const API_VERSION    = '2026-01';   // صريحة دايمًا — ممنوع "latest"
 
@@ -360,7 +360,7 @@ const ORDER_FIELDS = `
               title
               barcode
               media(first: 1) { nodes { preview { image { url } } } }
-              product { id title featuredMedia { preview { image { url } } } }
+              product { id legacyResourceId title featuredMedia { preview { image { url } } } }
             }
           }
         }
@@ -406,6 +406,11 @@ function shapeOrder(order) {
       quantity:     n.currentQuantity,
       variantTitle: (n.variant?.title && n.variant.title !== 'Default Title') ? n.variant.title : null,
       variantId:    n.variant?.legacyResourceId || null,
+      // 🔴 **`productId` إلزامي جنب `variantId`** (v1.3.0) — رابط صفحة
+      //    المتغيّر في الأدمن **مركّب من الاتنين**:
+      //    `/products/<productId>/variants/<variantId>`. الواجهة بتخلّي
+      //    الـ SKU لينك بيه، و`variantId` لوحده مايبنيش رابط صالح.
+      productId:    n.variant?.product?.legacyResourceId || null,
       image:        pickImage(n.variant, n.variant?.product),
     }));
 
@@ -454,7 +459,23 @@ async function fetchOrderById(env, token, rawId) {
 }
 
 // ─── §BARCODE::searchVariants ───
-const Q_VARIANTS = `
+//
+// 🔴 **الاستعلام بيتبني بنسختين — والسبب صلاحية، مش تحسين** (v1.3.0).
+//    `ProductVariant.inventoryQuantity` تحت **`read_inventory`**، وهي
+//    **مش** من الصلاحيتين اللي الأداة كانت محتاجاهم لحد `1.2.1`
+//    (`read_orders` · `read_products`). ولو الصلاحية دي ناقصة على التطبيق،
+//    شوبيفاي بيرجّع **خطأ top-level** — يعني الاستعلام كله بيقع و**البحث
+//    بالـ SKU بيبطّل يشتغل خالص**، مش إن عمود المخزون بس يفضل فاضي.
+//    عشان كده: النسخة الكاملة بتتجرّب الأول، ولو وقعت بخطأ صلاحية
+//    بنعيد **مرة واحدة** بالنسخة اللي من غير الحقل و`available` بترجع
+//    `null`. البحث بيفضل شغّال، والناقص **بيتقال** في `diag`.
+// ⚠️ `invScopeOk` كاش **في الـ isolate** — بيمنع نداءين على كل بحث بعد أول
+//    فشل. لو الصلاحية اتضافت بعدين، بيرجع `true` مع أول isolate جديد
+//    (أي deploy أو بعد خمول) — مش حالة تحتاج تدخّل.
+let invScopeOk = true;
+
+function variantsQuery(withInventory) {
+  return `
   query SkuLookup($q: String!, $n: Int!) {
     productVariants(first: $n, query: $q) {
       pageInfo { hasNextPage }
@@ -465,12 +486,22 @@ const Q_VARIANTS = `
         barcode
         title
         displayName
+        ${withInventory ? 'inventoryQuantity' : ''}
         media(first: 1) { nodes { preview { image { url } } } }
-        product { id title status featuredMedia { preview { image { url } } } }
+        product { id legacyResourceId title status featuredMedia { preview { image { url } } } }
       }
     }
   }
 `;
+}
+const Q_VARIANTS     = variantsQuery(true);
+const Q_VARIANTS_LEAN = variantsQuery(false);
+
+// خطأ صلاحية بيتعرف من نصّه — شوبيفاي بيرجّعه كـ top-level error
+// (`ACCESS_DENIED`) مش كحقل فاضي.
+function isScopeError(msg) {
+  return /access denied|ACCESS_DENIED|scope|not approved|permission/i.test(String(msg || ''));
+}
 
 // بحث مباشر من غير أوردر — لإعادة طباعة ليبل ضاع.
 //
@@ -522,13 +553,34 @@ async function searchVariants(env, token, term) {
   // مدخل كله رموز — نرجّع فاضي **من غير نداء**، بدل استعلام مشوّه.
   if (!q) return { variants: [], truncated: false, cap: SKU_SEARCH_MAX };
 
-  const data = await shopifyGQL(env, token, Q_VARIANTS, { q, n: SKU_SEARCH_MAX }, 'search_sku');
+  let data;
+  if (invScopeOk) {
+    try {
+      data = await shopifyGQL(env, token, Q_VARIANTS, { q, n: SKU_SEARCH_MAX }, 'search_sku');
+    } catch (e) {
+      if (!isScopeError(e.message)) throw e;
+      invScopeOk = false;   // ⚠️ مرة واحدة — البحث بعدها بيروح على النسخة اللين
+    }
+  }
+  if (!data) {
+    data = await shopifyGQL(env, token, Q_VARIANTS_LEAN, { q, n: SKU_SEARCH_MAX }, 'search_sku_lean');
+  }
   const conn = data?.data?.productVariants || {};
 
   const variants = (conn.nodes || []).map(v => ({
     variantId:   v.legacyResourceId,
+    // 🔴 **`productId` (v1.3.0)** — نصّ الرابط بتاع صفحة المتغيّر في الأدمن
+    //    محتاج الاتنين: `/products/<productId>/variants/<variantId>`.
+    productId:   v.product?.legacyResourceId || null,
     sku:         v.sku || null,
     barcode:     v.barcode || null,
+    // 🔴 **`available` = المخزون المتاح (v1.3.0).** `inventoryQuantity` في
+    //    شوبيفاي هو **Available** المجمّع على كل المواقع — نفس الرقم اللي
+    //    الموظف شايفه في صفحة المتغيّر تحت Inventory.
+    //    ⚠️ **`null` مش `0` لما شوبيفاي مايرجّعش الحقل** — تتبّع المخزون
+    //       ممكن يكون مقفول على المتغيّر، و«صفر» ساعتها **كذب**: بيتقري
+    //       «مفيش في المخزن» بدل «الرقم مش معروف».
+    available:   (typeof v.inventoryQuantity === 'number') ? v.inventoryQuantity : null,
     title:       v.product?.title || v.displayName || '',
     variantTitle: (v.title && v.title !== 'Default Title') ? v.title : null,
     productStatus: v.product?.status || null,
@@ -715,6 +767,25 @@ export default {
               detail: scopes.includes(need) ? 'موجودة' : 'ناقصة — ضيفها في الـ Custom App',
             });
           }
+          // 🔴 **`read_inventory` بند تالت في الفحص (v1.3.0).** المخزون
+          //    المتاح (`available`) بيتقرا من `ProductVariant.inventoryQuantity`
+          //    وهي **تحت الصلاحية دي**. غيابها **مش بيوقّف البحث** —
+          //    `searchVariants` بترجع للاستعلام اللين و`available` بترجع
+          //    `null` — بس خانة «الكمية» بتفضل `—` على كل صنف، و**من غير
+          //    السطر ده الغياب ده مالوش أي سبب مكتوب في أي مكان**.
+          //    ⚠️ الشكل هنا **مصفوفة** (`[{ok,label,detail}]`)، و`diagRows`
+          //       في الهب بترسم `ok:false` **❌** — مفيش درجة «تحذير» في
+          //       الشكل ده. عشان كده **الـ `detail` هو اللي بيمنع القراية
+          //       الغلط**: بيقول بالنص إن البحث شغّال وإن الناقص هو الكمية.
+          //       ⛔ متشيلش الجملة دي — ❌ بلا سياق بيتقري «الأداة عطلانة»
+          //       على أداة شغّالة تمامًا.
+          checks.push({
+            ok:     scopes.includes('read_inventory'),
+            label:  'صلاحية read_inventory',
+            detail: scopes.includes('read_inventory')
+              ? 'موجودة — «الكمية» بتتعرض على أصناف الـ SKU'
+              : 'ناقصة — البحث بالـ SKU شغّال زي ما هو، والناقص إن خانة «الكمية» هتفضل «—». ضيفها في الـ Custom App',
+          });
           checks.push({ ok: true, label: 'accessScopes', detail: scopes.join(', ') || '—' });
         } catch (e) {
           checks.push({ ok: false, label: 'شوبيفاي OAuth', detail: `FAILED: ${e.message}` });
