@@ -49,7 +49,7 @@
 // §CONSTANTS
 // ══════════════════════════════════════════════════════
 const TOOL_NAME      = 'order_sku_barcode_printer';
-const WORKER_VERSION = '1.2.0';
+const WORKER_VERSION = '1.2.1';
 const SECRET_GROUP   = 'warehouse_ops';
 const API_VERSION    = '2026-01';   // صريحة دايمًا — ممنوع "latest"
 
@@ -483,12 +483,44 @@ const Q_VARIANTS = `
 // ⚠️ `sku:` و`barcode:` **صالحين على `productVariants`** ومش صالحين على
 //    `orders` (اللي بيرجّع صفر نتايج بلا أي خطأ — `shopify-graphql-helper`
 //    Step 3). اتأكد حيًا 06-09-2026 على `FL-PO-10` و`34271298`.
+// 🔴 **الباج اللي النسخة دي اتكتبت عشانه (v1.2.1):** الاستعلام القديم كان
+//    `(sku:${term}*) OR (barcode:${term})` بالمدخل **زي ما هو**. الـ SKU
+//    عندنا فيه **مسافات وشرطات مايلة** (`SD1 / Light grey / 45`)، وبحث
+//    شوبيفاي بيقسّم النص ده لكلمات منفصلة — فـ `Light` و`grey` بقوا شروط
+//    بحث عامة، والنتيجة **صفر** على SKU **موجود فعلاً**. ⚠️ وطبعًا **من
+//    غير أي خطأ**: الرد `200` بمصفوفة فاضية، والواجهة بتقول «مفيش أي صنف
+//    بالـ SKU ده على شوبيفاي» على صنف قدام الموظف في الجدول.
+//
+// 🔴 **الحل: كل كلمة في المدخل بتبقى شرط `sku:` لوحده، والشروط بـ `AND`.**
+//    `SD1 / Light grey / 45` → `(sku:SD1*) AND (sku:Light*) AND (sku:grey*)
+//    AND (sku:45*)`. اتأكّد **حيًا** على المتجر (08-09-2026): الشكل ده
+//    بيرجّع الصنف الواحد بالظبط، والجزئي (`SD1 / Light`) بيرجّع الأربعة
+//    مقاسات — يعني نفس الاستعلام بيخدم البحث الكامل والجزئي.
+//    ⚠️ **`sku:"..."` (اقتباس) بيشتغل للتطابق التام بس** — اتجرّب حيًا
+//       ورجّع الصنف صح، بس `sku:"SD1 / Light"` رجّع **صفر**، يعني كان
+//       هيكسر البحث الجزئي اللي القايمة المنسدلة قايمة عليه.
+//    ⚠️ **النجمة على كل كلمة مقصودة** — `45*` بيطابق `45` بالظبط كمان،
+//       والمقاس آخر كلمة في الـ SKU فمن غير النجمة الكلمة الناقصة وانت
+//       بتكتب مابتطابقش حاجة.
+//
+// ⚠️ **`barcode:` بيتضاف بس لما المدخل كله رقم صافي** — الباركود رقم
+//    مالوش مسافات، وخلطه في استعلام فيه `AND` كان بيخلّي أسبقية
+//    `AND`/`OR` غامضة والنتيجة بتفرق من مدخل للتاني.
+function buildSkuQuery(term) {
+  // شيل اللي بيكسر بنية الاستعلام نفسه (اقتباس · قوس · نجمة مكتوبة
+  // بالإيد · نقطتين) — مش تطبيع للمعنى، ده تنضيف بنية.
+  const tokens = String(term).replace(/["\\()*:]/g, ' ').split(/[\s/]+/).filter(Boolean);
+  if (!tokens.length) return null;
+  if (tokens.length === 1 && /^\d+$/.test(tokens[0])) {
+    return `(sku:${tokens[0]}*) OR (barcode:${tokens[0]})`;
+  }
+  return tokens.map(t => `(sku:${t}*)`).join(' AND ');
+}
+
 async function searchVariants(env, token, term) {
-  // الرقم الصافي ممكن يكون باركود أو جزء من SKU — بندوّر بالاتنين.
-  // النجمة بتخلّي `FL-PO-10` يطابق `FL-PO-10 / Black / 43` (الـ SKU عندنا
-  // بيشمل اللون والمقاس).
-  const safe = term.replace(/["\\]/g, ' ').trim();
-  const q = `(sku:${safe}*) OR (barcode:${safe})`;
+  const q = buildSkuQuery(term);
+  // مدخل كله رموز — نرجّع فاضي **من غير نداء**، بدل استعلام مشوّه.
+  if (!q) return { variants: [], truncated: false, cap: SKU_SEARCH_MAX };
 
   const data = await shopifyGQL(env, token, Q_VARIANTS, { q, n: SKU_SEARCH_MAX }, 'search_sku');
   const conn = data?.data?.productVariants || {};
