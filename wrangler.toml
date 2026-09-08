@@ -12,12 +12,19 @@ workers_dev        = true
 [observability]
 enabled = true
 
-# 🔴 **مفيش `[[d1_databases]]` هنا — وده مقصود.**
-#    الأداة قراءة بحتة: صفر كتابة على شوبيفاي وصفر صف في D1، فمفيش
-#    `writeLog` ومفيش binding. الانحراف الموثّق عن `ecommoda-worker-builder`
-#    Rule 2 مكتوب في `index.js` §HEADER وفي `CLAUDE.md`.
-#    لو اتقرر تسجيل الطباعة بعدين: يتضاف الـ binding **و** يتسجّل صف
-#    `order_sku_barcode_printer` في `ecommoda-constants` §7 قبل أول كتابة.
+# 🔴 **`[[d1_databases]]` اتضاف في v1.2.0 — الانحراف الأول اتقفل.**
+#    الأداة كانت قراءة بحتة (صفر صف في D1)، والثمن المكتوب في `CLAUDE.md`
+#    كان صريح: **مفيش أي أثر لمين طبع إيه وإمتى**. تاب «سجل العمليات»
+#    (قرار أحمد 08-09-2026) بيقفل الثمن ده، فالـ binding بقى مطلوب.
+#    ⚠️ الاسم **`DB` بالحرف** — أي اسم تاني = كتابة فاشلة **في صمت**
+#       (`ecommoda-constants` §2).
+#    ⚠️ الأداة لسه **صفر كتابة على شوبيفاي** — الكتابة الوحيدة صف سجل
+#       append-only تحت `order_sku_barcode_printer` (§7).
+
+[[d1_databases]]
+binding       = "DB"
+database_name = "ecommoda-dev-logs"
+database_id   = "90db62d3-bd7e-4d92-912b-10fc78eeb565"
 
 [vars]
 SHOP_DOMAIN = "6c7e1a-53.myshopify.com"

@@ -1,26 +1,42 @@
 // ══════════════════════════════════════════════════════════════
-// EcomModa — Order SKU Barcode Printer Worker (v1.1.0)
+// EcomModa — Order SKU Barcode Printer Worker (v1.2.0)
 // skills: worker-builder v2.1.0 · constants v1.10.0 ·
-//         shopify-graphql-helper v1.1.0 — 06-09-2026
+//         shopify-graphql-helper v1.1.0 — 08-09-2026
 // ══════════════════════════════════════════════════════════════
 //
 // بيرجّع بيانات الباركود عشان الواجهة تطبع ليبل 2×1 إنش:
 //   ① `get_order`  — أوردر كامل → بنوده الفعّالة (SKU · barcode · كمية)
 //                    بـ `order=` (الاسم) أو `id=` (الـ ID الرقمي — v1.1.0)
 //   ② `search_sku` — بحث مباشر بـ SKU أو رقم باركود، **من غير أوردر**
+//                    (رجع ليه مستهلك في v1.2.0 — مربع «طباعة بالـ SKU»)
+//   ③ `log_print` + `get_logs*` — سجل العمليات (v1.2.0)
 //
-// 🔴 **قراءة بحتة.** صفر كتابة على شوبيفاي · صفر كتابة في D1 · صفر
-//    ميوتيشن. الانحرافان الموثّقان عن `ecommoda-worker-builder` Step 2:
+// 🔴 **صفر كتابة على شوبيفاي — لسه.** ميوتيشن واحدة مافيش. الجديد في
+//    v1.2.0 هو كتابة **صف سجل append-only في D1** وبس.
 //
-//    • Rule 2 (D1 logging) — الأداة **مابتكتبش أي صف**، فمفيش `DB` binding
-//      ومفيش `writeLog` ومفيش قيمة `tool` في `ecommoda-constants` §7.
-//      قرار أحمد 06-09-2026. لو اتقرر تسجيل الطباعة بعدين، الصف يتسجّل
-//      في §7 **قبل** أول `writeLog` — مش بعده.
+//    • Rule 2 (D1 logging) — **الانحراف ده اتقفل في v1.2.0.** الأداة بقت
+//      بتكتب `tool = 'order_sku_barcode_printer'` بـ `type` = `print`
+//      (ليبلات أوردر) أو `print_sku` (ليبل صنف من غير أوردر). الثمن
+//      القديم كان مكتوب صراحةً في `CLAUDE.md`: «مفيش أي أثر لمين طبع إيه
+//      وإمتى» — وده بالظبط اللي تاب السجل اتضاف عشانه (قرار أحمد
+//      08-09-2026).
+//      🔴 **بند مفتوح:** الصف لازم يتسجّل في `ecommoda-constants` §7
+//         (Rule 7 — التسجيل **قبل** أول `writeLog`). التسجيل ده بيتعمل في
+//         محادثة تحديث مهارات، والبند مكتوب في `CLAUDE.md` §مسائل مفتوحة
+//         في الريبوهين.
 //    • Rule 3 (Universal D1 Auth) — الأداة **مالهاش واجهة مستقلة**؛
 //      مستهلكها الوحيد `sku-barcode.html` جوّه هب مركز عمليات المخزن،
 //      والدخول بيحصل هناك عبر `orders-packing-checker-worker` وبيتسجّل
 //      تحت `warehouse_ops_center`. فالأداة **بتتطلّب دخول فعلاً**، بس
 //      نقطة الدخول مش هنا — فمفيش §SHARED ومفيش endpoints دخول.
+//      ⚠️ **وده لسه ساري بعد v1.2.0.** فلتر الموظف في تاب السجل بيتعبّى من
+//         `get_employees` بتاع **Worker التغليف** (اللي الصفحة بتناديه أصلاً
+//         لتحويل تراكينج بوسطة) — مش من هنا. نسخ §SHARED هنا كان هيدّي
+//         نقطة دخول تانية مالهاش لازمة.
+//      ⚠️ ونتيجة مباشرة: `employee` بييجي **من العميل** في `log_print` —
+//         نفس وضع كل أدوات الستاك النهاردة (الـ Worker بيتحقق من السر مش
+//         من هوية الموظف). المحاسبة **شرف مش إثبات**، بالظبط زي ما هو
+//         مكتوب في `Warehouse-Operations-Center/CLAUDE.md`.
 //
 // 🔴 عضو في **مجموعة السر `warehouse_ops`** (`ecommoda-constants` §6) —
 //    `WORKER_SECRET` قيمته **نفس قيمة** الطباعة والتغليف وحذف المنتج،
@@ -33,7 +49,7 @@
 // §CONSTANTS
 // ══════════════════════════════════════════════════════
 const TOOL_NAME      = 'order_sku_barcode_printer';
-const WORKER_VERSION = '1.1.0';
+const WORKER_VERSION = '1.2.0';
 const SECRET_GROUP   = 'warehouse_ops';
 const API_VERSION    = '2026-01';   // صريحة دايمًا — ممنوع "latest"
 
@@ -46,11 +62,28 @@ const ORDER_LINE_ITEMS_MAX = 100;
 // مش بيدوّر على صنف — والواجهة بتقول إن فيه أكتر.
 const SKU_SEARCH_MAX = 50;
 
+// سقف صفوف السجل في نداء واحد — بيرجع للواجهة كـ `cap` مع `total` و
+// `truncated` عشان بانر الاقتطاع مايبقاش رقم مكتوب بإيد في الواجهة.
+const LOG_EXPORT_MAX = 2000;
+
+// حراس حجم على `log_print` — الدفعة الواقعية أوردر أو تلاتة، والأرقام دي
+// **حارس ضد نداء مشوّه**، مش سقف تشغيلي. تخطّيها = 400 صريحة مش قص صامت.
+const LOG_MAX_ORDERS = 100;
+const LOG_MAX_SKUS   = 200;
+
 // ══════════════════════════════════════════════════════
-// §CORS — أداة قراءة فقط → Option A: Wildcard
+// §CORS — Option A: Wildcard
 // ══════════════════════════════════════════════════════
-// (`references/cors-patterns.md` — مفيش أي كتابة على شوبيفاي، والحماية
-//  الحقيقية في `WORKER_SECRET`.)
+// (`references/cors-patterns.md`)
+//
+// ⚠️ **اتراجع تاني في v1.2.0 لما الأداة بقت بتكتب في D1** — والقرار إنه
+//    يفضل Option A. قاعدة الاختيار في المهارة بتفرّق بين «أدوات كتابة
+//    مالية/تشغيلية» (Option B) و«أدوات قراءة/عرض» (Option A)، والكتابة
+//    الوحيدة هنا **صف سجل append-only** تحت اسم الأداة نفسها: صفر لمسة
+//    على شوبيفاي، صفر تعديل على أي بيانات قائمة، والحماية الحقيقية —
+//    قبل التعديل وبعده — هي `WORKER_SECRET`.
+//    ⛔ لو الأداة كتبت يومًا حاجة على شوبيفاي، البند ده يترجع فيه فورًا
+//       لـ Option B (allowlist) في **نفس** التسليم.
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -100,6 +133,134 @@ function pickImage(variant, product) {
       || product?.featuredMedia?.preview?.image?.url
       || null;
 }
+
+// ══════════════════════════════════════════════════════
+// §SHARED-LOG — منسوخة حرفيًا من `ecommoda-worker-builder`
+//               → `references/shared-functions.md`
+// ══════════════════════════════════════════════════════
+//
+// ⛔ **ممنوع أي تعديل على الدوال دي.** الكتلة دي مشتركة بين كل أدوات
+//    الستاك، وأي تعديل محلي فيها بيخلّي السجل هنا يفلتر بشكل مختلف عن
+//    اللي جنبه — والفرق **مابيديش أي خطأ**، بس التصدير بينزّل غير
+//    المعروض. أي تحسين مكانه المهارة نفسها مش الأداة (درس R1).
+
+// 🔴 **`writeLog` (صف واحد) مش منسوخة هنا عن قصد — والسبب مش تنضيف كود.**
+//    وحدة العملية في الأداة دي هي **الدفعة**، مش الصف: ضغطة طباعة واحدة
+//    بتنتج صف لكل أوردر. لو الكتابة اتعملت بحلقة `writeLog`، فشل في نص
+//    الحلقة بيسيب **نص دفعة مسجّلة** — سجل بيقول إن ٣ أوردرات اتطبعت
+//    والحقيقة ٨، من غير أي خطأ ظاهر. `writeLogBatch` تحت بتكتبهم كلهم أو
+//    ولا واحد. نسخ `writeLog` جنبها كان هيسيب **مسارين كتابة** يفترقوا مع
+//    أول تعديل (درس R1).
+//    ⚠️ الشكل (الأعمدة والترتيب والتحويلات) **مطابق لـ `writeLog` بالحرف**
+//       — أي حقل جديد في المهارة يتضاف هنا في نفس التمريرة.
+async function writeLogBatch(db, entries) {
+  if (!entries.length) return 0;
+  const stmt = db.prepare(`
+    INSERT INTO logs
+      (timestamp, tool, type, employee, order_id, order_name,
+       sku, product_title, delta, value_before, value_after, notes, extra)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  await db.batch(entries.map(entry => stmt.bind(
+    entry.timestamp    ?? new Date().toISOString(),
+    entry.tool,
+    entry.type,
+    entry.employee     ?? null,
+    entry.orderId      ?? null,
+    entry.orderName    ?? null,
+    entry.sku          ?? null,
+    entry.productTitle ?? null,
+    entry.delta        ?? null,
+    entry.valueBefore  ?? null,
+    entry.valueAfter   ?? null,
+    entry.notes        ?? null,
+    entry.extra ? JSON.stringify(entry.extra) : null
+  )));
+  return entries.length;
+}
+
+/**
+ * بنّاء شرط الفلترة الموحّد — التلات دوال تحته بتستخدمه، فمفيش SQL مكرر
+ * يتعتّق في واحدة ويسيب التانية.
+ * ⚠️ `dateFrom`/`dateTo` بيتقارنوا بـ `substr(timestamp,1,10)` = **UTC**،
+ *    والعرض بتوقيت القاهرة. الفرق مقبول لفلتر بالأيام — **بس مكتوب**.
+ * `login`/`logout` مستثنيين في SQL دايمًا.
+ */
+function buildLogFilterSQL(select, {
+  tool      = null,
+  employee  = null, employees = null,
+  type      = null, types     = null,
+  search    = null,
+  dateFrom  = null, dateTo    = null,
+} = {}) {
+  let sql = `${select} FROM logs WHERE type NOT IN ('login','logout')`;
+  const b = [];
+
+  const emps = Array.isArray(employees) && employees.length ? employees : (employee ? [employee] : []);
+  const typs = Array.isArray(types)     && types.length     ? types     : (type     ? [type]     : []);
+
+  if (tool) { sql += ' AND tool = ?'; b.push(tool); }
+  if (emps.length) {
+    sql += ` AND employee IN (${emps.map(() => '?').join(',')})`; b.push(...emps);
+  }
+  if (typs.length) {
+    sql += ` AND type IN (${typs.map(() => '?').join(',')})`; b.push(...typs);
+  }
+  if (search) {
+    sql += ' AND (order_name LIKE ? OR notes LIKE ?)';
+    b.push(`%${search}%`, `%${search}%`);
+  }
+  if (dateFrom) { sql += ' AND substr(timestamp, 1, 10) >= ?'; b.push(dateFrom); }
+  if (dateTo)   { sql += ' AND substr(timestamp, 1, 10) <= ?'; b.push(dateTo); }
+
+  return { sql, b };
+}
+
+/** صفحة واحدة من السجل — سقف ١٠٠ صف مفروض من السيرفر. */
+async function getLogs(db, { limit = 100, offset = 0, ...filters } = {}) {
+  const { sql, b } = buildLogFilterSQL('SELECT *', filters);
+  const q = sql + ' ORDER BY timestamp DESC LIMIT ? OFFSET ?';
+  return (await db.prepare(q)
+    .bind(...b, Math.min(limit, 100), Math.max(offset, 0)).all()).results;
+}
+
+/** العدّ الحقيقي بنفس الفلاتر — بيتنادى بالتوازي مع الاتنين التانيين. */
+async function getLogsCount(db, filters = {}) {
+  const { sql, b } = buildLogFilterSQL('SELECT COUNT(*) as total', filters);
+  const row = await db.prepare(sql).bind(...b).first();
+  return row?.total ?? 0;
+}
+
+/**
+ * التصدير — لحد `LOG_EXPORT_MAX`.
+ * ⚠️ الدالة دي **بتقص في السكوت** بطبيعتها، فالـ endpoint لازم يرجّع
+ *    `cap`/`total`/`truncated` كمان.
+ */
+async function getLogsExport(db, filters = {}) {
+  const { sql, b } = buildLogFilterSQL('SELECT *', filters);
+  const q = sql + ' ORDER BY timestamp DESC LIMIT ?';
+  return (await db.prepare(q).bind(...b, LOG_EXPORT_MAX).all()).results;
+}
+
+/** قراءة فلاتر السجل من الـ query string — مصدر واحد للتلات endpoints. */
+function logParamsFrom(url, tool) {
+  const csv = (k) => (url.searchParams.get(k) || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+  const employees = csv('employees'), types = csv('types');
+  return {
+    tool,
+    employees: employees.length ? employees : null,
+    employee:  url.searchParams.get('employee') || null,
+    types:     types.length ? types : null,
+    type:      url.searchParams.get('type')     || null,
+    search:    url.searchParams.get('search')   || null,
+    dateFrom:  url.searchParams.get('dateFrom') || null,
+    dateTo:    url.searchParams.get('dateTo')   || null,
+  };
+}
+// ══════════════════════════════════════════════════════
+// END §SHARED-LOG
+// ══════════════════════════════════════════════════════
 
 // ══════════════════════════════════════════════════════
 // §SHOPIFY
@@ -313,6 +474,12 @@ const Q_VARIANTS = `
 
 // بحث مباشر من غير أوردر — لإعادة طباعة ليبل ضاع.
 //
+// ✅ **رجع ليه مستهلك في v1.2.0** بعد ما فضل بلا مستهلك من هب v1.10.0:
+//    مربع «طباعة بالـ SKU» في `sku-barcode.html` بينادي المسار ده بالـ SKU
+//    الكامل زي ما هو مسجّل على شوبيفاي (`RN-AD-115 / Black / 45`).
+//    ⚠️ يعني البند اللي كان مفتوح («يتشال ولا يفضل؟») **اتقفل بالإبقاء** —
+//       والشيل بقى تغيير كاسر، مش تنضيف.
+//
 // ⚠️ `sku:` و`barcode:` **صالحين على `productVariants`** ومش صالحين على
 //    `orders` (اللي بيرجّع صفر نتايج بلا أي خطأ — `shopify-graphql-helper`
 //    Step 3). اتأكد حيًا 06-09-2026 على `FL-PO-10` و`34271298`.
@@ -343,6 +510,84 @@ async function searchVariants(env, token, term) {
     truncated: !!conn.pageInfo?.hasNextPage,
     cap:       SKU_SEARCH_MAX,
   };
+}
+
+// ══════════════════════════════════════════════════════
+// §PRINT-LOG — تحويل دفعة الطباعة لصفوف D1 (v1.2.0)
+// ══════════════════════════════════════════════════════
+//
+// 🔴 **صف لكل أوردر، مش صف للدفعة كلها ولا صف لكل ليبل.**
+//    · صف للدفعة كله = عمود `order_name` فاضي، والسجل بيبقى مش قابل
+//      للبحث برقم أوردر — وده **أول** سؤال بيتسأل («الأوردر ده اتطبع
+//      ليبله ولا لأ؟»). و`buildLogFilterSQL` بيبحث في `order_name` أصلاً.
+//    · صف لكل ليبل = دفعة ٤٢ ليبل بتكتب ٤٢ صف، والجدول بيبقى ضوضاء.
+//    الأصناف وأعداد النسخ بتتحفظ في `extra.items` — تفصيلة بتتقرا لما
+//    تتطلب، مش صف في الجدول.
+//
+// 🔴 **ليبل بلا أوردر (`type = 'print_sku'`) بياخد صف لكل صنف** — هنا
+//    الصنف **هو** وحدة العملية (مفيش أوردر يجمّعه)، فالـ `sku` لازم يبقى
+//    في عموده عشان الفلتر والتصدير يشوفوه.
+//
+// ⚠️ كل الصفوف بتتكتب بـ **نفس** `timestamp` — الدفعة عملية واحدة، ولو كل
+//    صف أخد وقته الصفوف بتتفرّق في الترتيب وتبان كأنها عمليات منفصلة.
+function buildPrintLogRows(body) {
+  const employee = String(body?.employee || '').trim() || null;
+  const orders   = Array.isArray(body?.orders)   ? body.orders   : [];
+  const skuItems = Array.isArray(body?.skuItems) ? body.skuItems : [];
+
+  if (!employee) throw new Error('اسم الموظف مطلوب في تسجيل الطباعة');
+  if (orders.length > LOG_MAX_ORDERS)  throw new Error(`عدد الأوردرات أكبر من الحد (${LOG_MAX_ORDERS})`);
+  if (skuItems.length > LOG_MAX_SKUS)  throw new Error(`عدد الأصناف أكبر من الحد (${LOG_MAX_SKUS})`);
+  if (!orders.length && !skuItems.length) throw new Error('مفيش أي ليبل في الدفعة');
+
+  const timestamp = new Date().toISOString();
+  const num = (v) => { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0; };
+  const str = (v, max = 300) => (v === null || v === undefined) ? null : String(v).slice(0, max);
+
+  // العدد الكلي بيتحسب **هنا من نفس المصفوفات** — مش بيتقرا من حقل
+  // بيبعته العميل. رقم بيبعته العميل جنب التفاصيل اللي بتناقضه = صف
+  // بيكدب من غير أي خطأ.
+  const orderLabels = orders.reduce(
+    (s, o) => s + (Array.isArray(o?.items) ? o.items.reduce((a, i) => a + num(i?.copies), 0) : 0), 0);
+  const skuLabels   = skuItems.reduce((s, i) => s + num(i?.copies), 0);
+  const batchTotal  = orderLabels + skuLabels;
+
+  const rows = [];
+
+  for (const o of orders) {
+    const items  = (Array.isArray(o?.items) ? o.items : [])
+      .map(i => ({ sku: str(i?.sku, 120), barcode: str(i?.barcode, 60), copies: num(i?.copies) }))
+      .filter(i => i.copies > 0);
+    const labels = items.reduce((s, i) => s + i.copies, 0);
+    if (!labels) continue;   // أوردر كل أصنافه على صفر = ما اتطبعش، فمفيش صف
+
+    rows.push({
+      tool: TOOL_NAME, type: 'print', timestamp, employee,
+      orderId:   str(o?.orderId, 40),
+      orderName: str(o?.orderName, 40),
+      // `delta` = عدد الليبلات اللي خرجت من الطابعة للأوردر ده. ده الرقم
+      // الوحيد اللي ينفع يتجمّع في تقرير بعدين.
+      delta: labels,
+      notes: `${labels} ليبل · ${items.length} صنف`,
+      extra: { source: str(o?.source, 20) || 'manual', items, batchTotal },
+    });
+  }
+
+  for (const i of skuItems) {
+    const copies = num(i?.copies);
+    if (!copies) continue;
+    rows.push({
+      tool: TOOL_NAME, type: 'print_sku', timestamp, employee,
+      sku:          str(i?.sku, 120),
+      productTitle: str(i?.title, 250),
+      delta:        copies,
+      notes:        `${copies} ليبل · بدون أوردر`,
+      extra: { source: 'sku', barcode: str(i?.barcode, 60), batchTotal },
+    });
+  }
+
+  if (!rows.length) throw new Error('مفيش أي ليبل بعدد نسخ أكبر من صفر');
+  return rows;
 }
 
 // ══════════════════════════════════════════════════════
@@ -404,6 +649,22 @@ export default {
           detail: fp ? `${fp} · مجموعة ${SECRET_GROUP}` : 'مفيش سر',
         });
 
+        // ②-ب D1 (v1.2.0) — الـ binding **و** إن الجدول بيتقري فعلاً.
+        //    ⚠️ وجود `env.DB` لوحده **مش كفاية**: binding موجود على قاعدة
+        //       غلط بيرمي عند أول استعلام مش عند الربط، وتاب السجل ساعتها
+        //       بيبان فاضي من غير أي سبب مكتوب. عشان كده الفحص **بيعدّ
+        //       صفوف الأداة فعلاً**.
+        if (!env.DB) {
+          checks.push({ ok: false, label: 'D1 (DB)', detail: 'الـ binding ناقص — ضيف [[d1_databases]] وانشر' });
+        } else {
+          try {
+            const n = await getLogsCount(env.DB, { tool: TOOL_NAME });
+            checks.push({ ok: true, label: 'D1 (DB)', detail: `متصل — ${n} صف تحت ${TOOL_NAME}` });
+          } catch (e) {
+            checks.push({ ok: false, label: 'D1 (DB)', detail: `FAILED: ${e.message}` });
+          }
+        }
+
         // ③ شوبيفاي — OAuth + الصلاحيات
         //    ⚠️ `read_products` **مطلوبة**، مش `read_orders` بس: الباركود
         //       جاي من المتغيّر، و`search_sku` بيستعلم `productVariants`
@@ -462,6 +723,62 @@ export default {
         const token = await getAccessToken(env);
         const result = await searchVariants(env, token, term);
         return json({ ok: true, term, ...result }, 200, request);
+      }
+
+      // ─── §LOG (v1.2.0) ────────────────────────────────────
+      //
+      // 🔴 **الحارس ده مش رفاهية.** من غير `env.DB` الاستعلام بيرمي
+      //    `Cannot read properties of undefined` — رسالة مالهاش أي علاقة
+      //    بالسبب (`binding` ناقص أو Promote ما اتعملش). نفس منطق
+      //    `assertEnv` مع المتغيّرات.
+      if (action === 'log_print' || action.startsWith('get_logs')) {
+        if (!env.DB) {
+          return json({ error: 'binding قاعدة البيانات (DB) ناقص في الـ Worker — راجع النشر' }, 500, request);
+        }
+      }
+
+      // ⚠️ **POST مش GET.** الكتابة عمرها ما بتكون على GET — أي prefetch
+      //    أو إعادة تحميل للرابط كان هيكتب صف تاني.
+      if (action === 'log_print') {
+        if (request.method !== 'POST') return json({ error: 'log_print لازم POST' }, 405, request);
+
+        let body;
+        try { body = await request.json(); }
+        catch { return json({ error: 'الرد مش JSON صالح' }, 400, request); }
+
+        let rows;
+        try { rows = buildPrintLogRows(body); }
+        catch (e) { return json({ error: e.message }, 400, request); }
+
+        // الدفعة كلها أو ولا حاجة — التفاصيل فوق جنب `writeLogBatch`.
+        const n = await writeLogBatch(env.DB, rows);
+        return json({ ok: true, rows: n }, 200, request);
+      }
+
+      if (action === 'get_logs') {
+        const p      = logParamsFrom(url, TOOL_NAME);
+        const limit  = Math.min(parseInt(url.searchParams.get('limit')  || '100'), 100);
+        const offset = Math.max(parseInt(url.searchParams.get('offset') || '0'),    0);
+        const entries = await getLogs(env.DB, { ...p, limit, offset });
+        return json({ ok: true, entries }, 200, request);
+      }
+
+      if (action === 'get_logs_count') {
+        const total = await getLogsCount(env.DB, logParamsFrom(url, TOOL_NAME));
+        return json({ ok: true, total }, 200, request);
+      }
+
+      // 🔴 **`entries` لوحدها ممنوعة.** `getLogsExport` بتقص عند السقف من
+      //    غير أي إشارة، والواجهة ساعتها بتقول «تم تصدير 2000 عملية ✓» على
+      //    ملف ناقص. `cap` و`total` و`truncated` **جزء من العقد**.
+      if (action === 'get_logs_export') {
+        const p = logParamsFrom(url, TOOL_NAME);
+        const [entries, total] = await Promise.all([
+          getLogsExport(env.DB, p),
+          getLogsCount(env.DB, p),
+        ]);
+        return json({ ok: true, entries, cap: LOG_EXPORT_MAX, total,
+                      truncated: total > LOG_EXPORT_MAX }, 200, request);
       }
 
       return json({ error: `action غير معروف: ${action}` }, 400, request);
