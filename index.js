@@ -1,8 +1,16 @@
 // ══════════════════════════════════════════════════════════════
-// EcomModa — Order SKU Barcode Printer Worker (v1.3.0)
-// skills: worker-builder v2.1.0 · constants v1.10.0 ·
-//         shopify-graphql-helper v1.1.0 — 08-09-2026
+// EcomModa — Order SKU Barcode Printer Worker (v1.3.1)
+// skills: worker-builder v3.8.0 · constants v3.1.0 ·
+//         shopify-graphql-helper v1.1.0 — 24-09-2026
 // ══════════════════════════════════════════════════════════════
+//
+// v1.3.1 — صفر تعديل منطق تشغيلي. طبقتان مراقبة إضافيتان
+//   (`ecommoda-worker-builder` Step 7 · Step 7-ج):
+//   ① `log-values.json` جنب الملف ده — سجل قيم اللوج، مع `check-log-values.mjs`
+//      اللي بيتحقق منه وقت النشر.
+//   ② الحارس الديناميكي (الطبقة ٥) في `writeLogBatch` — بيعلّم أي صف
+//      بقيمة `(tool, type)` غير مسجّلة (`extra._unregistered`) وبيبعت
+//      تنبيه UPSERT في `log_value_alerts`، بدون رفض كتابة أبدًا.
 //
 // بيرجّع بيانات الباركود عشان الواجهة تطبع ليبل 2×1 إنش:
 //   ① `get_order`  — أوردر كامل → بنوده الفعّالة (SKU · barcode · كمية)
@@ -49,7 +57,7 @@
 // §CONSTANTS
 // ══════════════════════════════════════════════════════
 const TOOL_NAME      = 'order_sku_barcode_printer';
-const WORKER_VERSION = '1.3.0';
+const WORKER_VERSION = '1.3.1';
 const SECRET_GROUP   = 'warehouse_ops';
 const API_VERSION    = '2026-01';   // صريحة دايمًا — ممنوع "latest"
 
@@ -144,6 +152,60 @@ function pickImage(variant, product) {
 //    اللي جنبه — والفرق **مابيديش أي خطأ**، بس التصدير بينزّل غير
 //    المعروض. أي تحسين مكانه المهارة نفسها مش الأداة (درس R1).
 
+// ════════════════════════════════════════════════════════════
+// §LOG-REG — الحارس الديناميكي لقيم اللوج (الطبقة ٥)
+//            `ecommoda-worker-builder` Step 7-ج
+// ════════════════════════════════════════════════════════════
+// قطعة الأداة دي بس من log-values.json اللي جنبها — بتتحدّث معاه في
+// نفس الـ commit. ممنوع شحن السجل الكامل بتاع كل الأدوات هنا.
+const LOG_REGISTRY = {
+  order_sku_barcode_printer: new Set(['print', 'print_sku']),
+};
+
+const isRegisteredLogValue = (tool, type) => !!LOG_REGISTRY[tool]?.has(type);
+
+// UPSERT على (source_tool, tool, type) — صف واحد لكل قيمة، hits بيعدّ.
+// الحدث الكامل مش بيضيع: الصف الأصلي موجود في logs وعليه _unregistered،
+// والجدول ده فهرس مش سجل تاني — عشان كده dedupe مش صف لكل حدث.
+const LOG_ALERT_SQL = `
+  INSERT INTO log_value_alerts
+    (source_tool, tool, type, first_seen, last_seen, hits,
+     worker_version, sample_order_name, sample_employee, sample_notes)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(source_tool, tool, type) DO UPDATE SET
+    last_seen         = excluded.last_seen,
+    hits              = log_value_alerts.hits + excluded.hits,
+    worker_version    = excluded.worker_version,
+    sample_order_name = excluded.sample_order_name,
+    sample_employee   = excluded.sample_employee,
+    sample_notes      = excluded.sample_notes,
+    status            = CASE WHEN log_value_alerts.status = 'ignored'
+                             THEN 'ignored' ELSE 'open' END
+`;
+
+// فشل التنبيه ممنوع يأثر على أي حاجة — try/catch صامت. بتجمّع التكرار
+// جوّه نفس الدفعة في صف واحد (hits) قبل ما تكتب.
+async function noteUnregisteredLogValues(db, entries) {
+  const byPair = new Map();
+  for (const e of entries) {
+    const key = `${e.tool}\u0000${e.type}`;
+    const acc = byPair.get(key);
+    if (acc) { acc.hits++; continue; }
+    byPair.set(key, { entry: e, hits: 1 });
+  }
+  const now = new Date().toISOString();
+  for (const { entry, hits } of byPair.values()) {
+    try {
+      await db.prepare(LOG_ALERT_SQL).bind(
+        TOOL_NAME, entry.tool ?? '(بدون tool)', entry.type ?? '(بدون type)',
+        now, now, hits, WORKER_VERSION ?? null,
+        entry.orderName ?? null, entry.employee ?? null,
+        entry.notes ? String(entry.notes).slice(0, 200) : null,
+      ).run();
+    } catch (e) { /* متعمّد: التنبيه فهرس، وفشله أهون من تعطيل الأداة */ }
+  }
+}
+
 // 🔴 **`writeLog` (صف واحد) مش منسوخة هنا عن قصد — والسبب مش تنضيف كود.**
 //    وحدة العملية في الأداة دي هي **الدفعة**، مش الصف: ضغطة طباعة واحدة
 //    بتنتج صف لكل أوردر. لو الكتابة اتعملت بحلقة `writeLog`، فشل في نص
@@ -153,6 +215,11 @@ function pickImage(variant, product) {
 //    أول تعديل (درس R1).
 //    ⚠️ الشكل (الأعمدة والترتيب والتحويلات) **مطابق لـ `writeLog` بالحرف**
 //       — أي حقل جديد في المهارة يتضاف هنا في نفس التمريرة.
+//
+// 🔴 **الحارس الديناميكي (الطبقة ٥) بيعلّم بس — مفيش رفض كتابة أبدًا.**
+//    صف بقيمة `(tool, type)` مش مسجّلة في `LOG_REGISTRY` بيتكتب زي ما هو
+//    + `extra._unregistered = true`، والتنبيه في `log_value_alerts` بيتبعت
+//    **بعد** الكتابة، مرة واحدة لكل الدفعة مش جوّه اللوب.
 async function writeLogBatch(db, entries) {
   if (!entries.length) return 0;
   const stmt = db.prepare(`
@@ -161,21 +228,31 @@ async function writeLogBatch(db, entries) {
        sku, product_title, delta, value_before, value_after, notes, extra)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
-  await db.batch(entries.map(entry => stmt.bind(
-    entry.timestamp    ?? new Date().toISOString(),
-    entry.tool,
-    entry.type,
-    entry.employee     ?? null,
-    entry.orderId      ?? null,
-    entry.orderName    ?? null,
-    entry.sku          ?? null,
-    entry.productTitle ?? null,
-    entry.delta        ?? null,
-    entry.valueBefore  ?? null,
-    entry.valueAfter   ?? null,
-    entry.notes        ?? null,
-    entry.extra ? JSON.stringify(entry.extra) : null
-  )));
+
+  const unregistered = [];
+  const bound = entries.map(entry => {
+    const flagged = !isRegisteredLogValue(entry.tool, entry.type);
+    if (flagged) unregistered.push(entry);
+    const extra = flagged ? { ...(entry.extra || {}), _unregistered: true } : entry.extra;
+    return stmt.bind(
+      entry.timestamp    ?? new Date().toISOString(),
+      entry.tool,
+      entry.type,
+      entry.employee     ?? null,
+      entry.orderId      ?? null,
+      entry.orderName    ?? null,
+      entry.sku          ?? null,
+      entry.productTitle ?? null,
+      entry.delta        ?? null,
+      entry.valueBefore  ?? null,
+      entry.valueAfter   ?? null,
+      entry.notes        ?? null,
+      extra ? JSON.stringify(extra) : null
+    );
+  });
+
+  await db.batch(bound);
+  if (unregistered.length) await noteUnregisteredLogValues(db, unregistered);
   return entries.length;
 }
 
