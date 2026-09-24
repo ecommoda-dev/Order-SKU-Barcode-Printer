@@ -1,0 +1,10 @@
+{
+  "tool": "order_sku_barcode_printer",
+  "since": "index.js v1.2.0",
+  "logAnchors": ["buildPrintLogRows"],
+  "types": {
+    "print":     { "result": "success", "stage": "write", "desc": "صف طباعة ليبلات لأوردر واحد داخل دفعة — delta = عدد الليبلات لهذا الأوردر" },
+    "print_sku": { "result": "success", "stage": "write", "desc": "صف طباعة ليبل لصنف بدون أوردر — delta = عدد نسخ الليبل لهذا الصنف" }
+  },
+  "dynamicTypes": []
+}

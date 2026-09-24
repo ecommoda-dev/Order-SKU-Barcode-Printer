@@ -475,16 +475,19 @@ SHOP_DOMAIN = "6c7e1a-53.myshopify.com"
 
 | المهارة | الإصدار وقت آخر تعديل |
 |---|---|
-| ecommoda-worker-builder | v2.1.0 |
-| ecommoda-constants | v1.10.0 |
+| ecommoda-worker-builder | v3.8.0 |
+| ecommoda-constants | v3.1.0 |
 | shopify-graphql-helper | v1.1.0 |
 | ecommoda-tool-migration-playbook | §13 (Promote) · §الربط بـ Builds |
 
-آخر مطابقة: 08-09-2026 · `index.js` v1.3.0
+آخر مطابقة: 24-09-2026 · `index.js` v1.3.1
 🔴 معلّقة: تسجيل `order_sku_barcode_printer` في `ecommoda-constants` §7
 
 ---
 
-آخر تحديث: 16-09-2026 — v1.3.0 (صفر تعديل Worker · بند مفتوح: الطباعة من قسم التغليف مالهاش صف في السجل)
+آخر تحديث: 24-09-2026 — v1.3.1 (صفر تعديل منطق تشغيلي · `log-values.json` +
+`check-log-values.mjs` (Step 7) · الحارس الديناميكي في `writeLogBatch`
+(الطبقة ٥ · Step 7-ج) · بند مفتوح لسه: الطباعة من قسم التغليف مالهاش صف في
+السجل)
 
 </div>
